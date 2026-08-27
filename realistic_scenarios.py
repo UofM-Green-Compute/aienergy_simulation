@@ -42,11 +42,7 @@ np.random.seed(42)
 
 # Load model_throughput_consolidated_DB.csv
 model_throughput = pd.read_csv('model_throughput_DB.csv')
-print(model_throughput.columns)
 
-# Drop those with Quantization != "FP8"
-# Paper for traditional queries makes the assumption that we are working with 
-# FP8, balances memory and speed.
 model_throughput = model_throughput[model_throughput['Quantization'] == 'FP8']
 
 #%%
@@ -58,13 +54,6 @@ def lognorm_params(min_val, max_val):
     The uncertainty range is defined using the 5th and 95th percentiles.
     The value 1.645 corresponds to the 95% confidence interval of a
     standard normal distribution.
-    
-    Convert minimum and maximum values into parameters of a log-normal
-    distribution. The method assumes that min_val and max_val represent
-    approximately the 5th and 95th percentiles of the distribution.1.645 is
-    the 95th percentile of a standard normal distribution. For a normal 
-    distribution, ~90% of values lie between mean - 1.645*sigma and mean
-    + 1.645*sigma. 
     """
     sigma = (np.log(max_val) - np.log(min_val)) / (2 * 1.645)
     mu = np.log(min_val) + 1.645 * sigma
@@ -85,10 +74,6 @@ def create_tps_regression_models(model_data):
     # Convert Input Length and Output Length to numeric (handle non-numeric values)
     model_data['Input_Length_numeric'] = pd.to_numeric(model_data['Input Length'], errors='coerce')
     model_data['Output_Length_numeric'] = pd.to_numeric(model_data['Output Length'], errors='coerce')
-    
-    print("Building TPS Models:")
-    print("=" * 50)
-    
     for model_name in model_data['Model'].unique():
         model_subset = model_data[model_data['Model'] == model_name].copy()
         
@@ -96,15 +81,12 @@ def create_tps_regression_models(model_data):
         model_subset = model_subset.dropna(subset=['Input_Length_numeric', 'Output_Length_numeric', 'TPS_numeric'])
         
         if len(model_subset) < 2:  # Need at least 2 points for interpolation
-            print(f"{model_name}: Insufficient data points ({len(model_subset)}), skipping")
             continue
         
         # Store the maximum TPS value for this model (for capping predictions)
         max_tps_values[model_name] = model_subset['TPS_numeric'].max()
         
         if len(model_subset) < 3:  # Use highest TPS for 2 points
-            print(f"{model_name}: Using highest TPS (only {len(model_subset)} data points)")
-            
             # Use the highest TPS value from available data
             max_tps = model_subset['TPS_numeric'].max()  # Changed from mean to max
             
@@ -114,15 +96,8 @@ def create_tps_regression_models(model_data):
                 'n_points': len(model_subset),
                 'tps_range': (model_subset['TPS_numeric'].min(), model_subset['TPS_numeric'].max())
             }
-            
-            print(f"  Data points: {len(model_subset)}")
-            print(f"  TPS range: {model_subset['TPS_numeric'].min():.2f} - {model_subset['TPS_numeric'].max():.2f}")
-            print(f"  Using max TPS: {max_tps:.2f}")
-            print()
-            
+
         else:  # Use regression for 3+ points
-            print(f"{model_name}: Using regression ({len(model_subset)} data points)")
-            
             # Features: [Input_Length, Output_Length]
             X = model_subset[['Input_Length_numeric', 'Output_Length_numeric']].values
             y = model_subset['TPS_numeric'].values
@@ -178,307 +153,365 @@ def predict_tps_for_lengths(model_name, input_length, output_length, regression_
     else:
         return None
 
-# Build regression models
 tps_regression_models, interpolation_models, max_tps_values = create_tps_regression_models(model_throughput)
 
-# Simulation settings --- THESE ARE THE ONES TO CHANGE
-n_runs = 10000 # large number of repeats so allows for statistical calculations
-fixed_input_length = 500  # Constant prompt length supplied to the TPS regression model when predicting throughput.
-# Calculate lambda parameter for exponential distribution to achieve desired median
+# Central values
+n_runs = 10_000
+DEFAULT_PUE = 1.30
+DEFAULT_PU = 0.70
 
-# Define ranges and values
+np.random.seed(42)
+
 def get_node_power(model_name):
     """
-    Node power from table of values.
+    Node power from the existing model-power assumptions.
     """
+
     return 12.8 if model_name == 'DeepSeek-R1' else 10.2
 
-pu_range = (0.4, 0.9)        # for lognormal, as 0.7Pmax is where it is centred
-PUE_range = (1.05, 1.6)       # for lognormal, as PUE ranges between those values
-
-# Power Usage Effectiveness (PUE) accounts for additional data centre
-# energy overhead such as cooling and power distribution losses.
-
-# Compute log-normal parameters where needed
-mu_pu, sigma_pu = lognorm_params(*pu_range)
-mu_pue, sigma_pue = lognorm_params(*PUE_range)
-
-# Create separate distributions for each model using regression
-all_model_energies = {}
-all_model_tps = {}  # Add this to store TPS predictions
-
-def model_energy_func(median_tokens):
+def calculate_energy(
+    input_tokens,
+    output_tokens,
+    model_name,
+    pue=DEFAULT_PUE,
+    pu=DEFAULT_PU
+):
     """
-    Takes in token lengths for realistic scenarios.
+    Calculate energy consumption for individual simulated queries.
 
     Parameters
     ----------
-    token_len : integer
-        Token length.
+    input_tokens : array-like
+        Number of input tokens for each query.
+
+    output_tokens : array-like
+        Number of output tokens for each query.
+
+    model_name : str
+        Model being simulated.
+
+    pue : float
+        Power Usage Effectiveness.
+
+    pu : float
+        Power utilisation.
 
     Returns
     -------
-    None
+    np.ndarray
+        Energy consumption in Wh for each query.
     """
-    
-    lambda_param = np.log(2) / median_tokens
-    
-    # Combine both model types for processing
-    all_tps_models = {**tps_regression_models, **interpolation_models}
-    
-    for model_name in all_tps_models.keys():
-        
-        # Get model-specific node power
-        node_power = get_node_power(model_name)
-        
-        # Generate random output token lengths (exponential distribution)
-        # Generate random output response lengths from an exponential distribution.
-        # The distribution is parameterised so that the median generated response
-        # contains 'median_output_tokens' tokens.
-        model_token_lengths = np.round(np.random.exponential(1/lambda_param, n_runs)).astype(int)
-        
-        # Estimate throughput for each simulated query.
-        # The input prompt length is held constant (300 tokens), while the
-        # generated response length varies between Monte Carlo samples.
-        model_tokens_per_sec = np.array([
-            predict_tps_for_lengths(model_name, fixed_input_length, token_length, tps_regression_models, interpolation_models, max_tps_values)
-            for token_length in model_token_lengths
-        ])
-        
-        # Handle any None values (fallback to mean if needed)
-        valid_tps = model_tokens_per_sec[model_tokens_per_sec != None]
-        if len(valid_tps) == 0:
-            print(f"  Warning: No valid TPS predictions for {model_name}, skipping")
-            continue
-        
-        model_tokens_per_sec = model_tokens_per_sec.astype(float)
-        
-        # Store TPS predictions for this model
-        all_model_tps[model_name] = model_tokens_per_sec
-        
-        # Calculate energies for this model
-        model_node_power_array = np.full(n_runs, node_power)  # Use model-specific power value
-        model_pu = np.random.lognormal(mu_pu, sigma_pu, n_runs)
-        model_pue = np.random.lognormal(mu_pue, sigma_pue, n_runs)
-        
-        # Calculate base energies for this model
-        model_energies = np.empty(n_runs)
-        
-        # Energy per query is calculated by dividing server power consumption
-        # by the number of queries processed per second (throughput).
-        for i in range(n_runs):
-            energy_kj = model_pue[i] * (model_node_power_array[i] * model_pu[i] * (model_token_lengths[i])) / model_tokens_per_sec[i]
-            model_energies[i] = (energy_kj / 3600) * 1000 # conversion factor from kj to Wh
-        
-        all_model_energies[model_name] = model_energies
 
-        # Rename the key in all_model_energies and all_model_tps to match the renamed model label
-        if 'DeepSeek-R1' in all_model_energies:
-            all_model_energies['DeepSeek-R1 671B'] = all_model_energies.pop('DeepSeek-R1')
-        if 'DeepSeek-R1' in all_model_tps:
-            all_model_tps['DeepSeek-R1 671B'] = all_model_tps.pop('DeepSeek-R1')
-        if 'Llama-3.1 Nemotron Ultra 253B' in all_model_energies:
-            all_model_energies['Llama-3.1 Nemotron\nUltra 253B'] = all_model_energies.pop('Llama-3.1 Nemotron Ultra 253B')
-        if 'Llama-3.1 Nemotron Ultra 253B' in all_model_tps:
-            all_model_tps['Llama-3.1 Nemotron\nUltra 253B'] = all_model_tps.pop('Llama-3.1 Nemotron Ultra 253B')
-        
-        # Create violin plots for each model
-        plot_data_list = []
-        for model_name, energies in all_model_energies.items():
-            if not np.isnan(energies).all():  # Skip models with all NaN values
-                # Filter outliers (5-95 percentile) - this filtered data will be used for both KDE and boxplot
-                p5, p95 = np.percentile(energies, [5, 95])
-                filtered_energies = energies[(energies >= p5) & (energies <= p95)]  # Changed to inclusive bounds
-                
-                df_model = pd.DataFrame({
-                    'Energy (Wh)': filtered_energies,
-                    'Model': model_name
-                })
-                plot_data_list.append(df_model)
-        
-        # Combine all model data
-        plot_data_combined = pd.concat(plot_data_list)
-        
-        # Define the desired order of models
-        model_order = [
-            'DeepSeek-R1 671B',
-            'Llama 3.1 405B',
-            'Llama-3.1 Nemotron\nUltra 253B',
-            'Mixtral 8x22B',
-            'Llama 3.1 70B'
-        ]
-        
-        # Rename label of DeepSeek-R1 to DeepSeek-R1 671B
-        plot_data_combined['Model'] = plot_data_combined['Model'].replace('DeepSeek-R1', 'DeepSeek-R1 671B')
-        # Rename label to add line break for better display
-        plot_data_combined['Model'] = plot_data_combined['Model'].replace('Llama-3.1 Nemotron Ultra 253B', 'Llama-3.1 Nemotron\nUltra 253B')
-        
-        # Create a custom color palette
-        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEEAD']
-        color_dict = dict(zip(model_order, colors))
-        
-        
-        # Print statistics for each model in the specified order
-        for model_name in model_order:
-            if model_name in all_model_energies:
-                energies = all_model_energies[model_name]
-                if not np.isnan(energies).all():
-                    p5, p25, p50, p75, p95 = np.percentile(energies, [5, 25, 50, 75, 95])
-                    mean = np.mean(energies)
-        
-        for model_name in model_order:
-            if model_name in all_model_tps:
-                tps_values = all_model_tps[model_name]
-                if not np.isnan(tps_values).all():
-                    p5, p25, p50, p75, p95 = np.percentile(tps_values, [5, 25, 50, 75, 95])
-                    mean = np.mean(tps_values)
-                    std = np.std(tps_values)
-        
-        # Print regression models first
-        for model_name in sorted(tps_regression_models.keys()):
-            model_info = tps_regression_models[model_name]
-            n_points = model_info['n_points']
-            
-            # Show regression coefficients (log-linear model interpretation)
-            coef = model_info['model'].coef_
-            intercept = model_info['model'].intercept_
-        
-        # Print interpolation models
-        max_tps_models_found = False
-        for model_name in sorted(interpolation_models.keys()):
-            max_tps_models_found = True
-            model_info = interpolation_models[model_name]
-            n_points = model_info['n_points']
-        
-        # Calculate median energy for each model to determine top 3
-        model_medians = {}
-        for model_name in model_order:
-            if model_name in all_model_energies:
-                energies = all_model_energies[model_name]
-                if not np.isnan(energies).all():
-                    median_energy = np.median(energies)
-                    model_medians[model_name] = median_energy
-        
-        # Sort models by median energy (descending - most energy intensive first)
-        sorted_models = sorted(model_medians.items(), key=lambda x: x[1], reverse=True)
-        top_3_models = [model[0] for model in sorted_models[:3]]
-        
-        
-        # Combine energy distributions from top 3 models
-        # Reduces noise in tail of violing plot for good visualization, does not change the results
-        additional_filtering = True  # Set to False to use only standard 5-95 filtering
-        
-        mixed_energies = []
-        
-        
-        for model_name in top_3_models:
-            if model_name in all_model_energies:
-                
-                energies = all_model_energies[model_name]
-                if not np.isnan(energies).all():
-                    
-                    # Stage 1: Standard 5-95 percentile filtering (consistent with Figure 1)
-                    p5, p95 = np.percentile(energies, [5, 95])
-                    stage1_filtered = energies[(energies >= p5) & (energies <= p95)]
-                    
-                    # Stage 2: Additional filtering on the already filtered data
-                    if additional_filtering:
-                        # Apply 10-90 percentile filtering on the Stage 1 filtered data
-                        p10_stage2, p90_stage2 = np.percentile(stage1_filtered, [10, 90])
-                        final_filtered = stage1_filtered[(stage1_filtered >= p10_stage2) & (stage1_filtered <= p90_stage2)]
-                    else:
-                        final_filtered = stage1_filtered
-                    
-             
-                    mixed_energies.extend(final_filtered)
-        
-    return np.asarray(mixed_energies)
-  
-### ENERGIES FOR DIFF SCENARIOS ###
-email_energy = model_energy_func(120)
-summary_energy = model_energy_func(350)
-report_energy = model_energy_func(900)
-meeting_energy = model_energy_func(2000)
+    node_power = get_node_power(model_name)
+    tps = np.array([
+        predict_tps_for_lengths(
+            model_name,
+            inp,
+            out,
+            tps_regression_models,
+            interpolation_models,
+            max_tps_values
+        )
+        for inp, out in zip(input_tokens, output_tokens)
+    ])
 
-### DATAFRAME FOR SCENARIOS ###
-plot_data = pd.concat([
-    pd.DataFrame({
-        "Energy (Wh)": email_energy,
-        "Scenario": "Email \ndrafting"}),
-    pd.DataFrame({
-        "Energy (Wh)": summary_energy,
-        "Scenario": "Document \nsummarisation"}),
-    pd.DataFrame({
-        "Energy (Wh)": report_energy,
-        "Scenario": "Long \nreport"}),
-    pd.DataFrame({
-        "Energy (Wh)": meeting_energy,
-        "Scenario": "Meeting"})],
-    ignore_index=True)
+    tps = tps.astype(float)
 
-plt.figure(figsize=(10, 8))
+    energy_wh = (
+        pue
+        * node_power
+        * pu
+        * output_tokens
+        / tps
+    ) * 1000 / 3600
 
-plt.rcParams.update({
-     'font.size': 18,
-     'axes.titlesize': 25,
-     'axes.labelsize': 20,
-     'xtick.labelsize': 18,
-     'ytick.labelsize': 18,
-     'legend.fontsize': 20,
-     'figure.titlesize': 25
- })
+    return energy_wh
 
-# Define colors for each category (same as fig1.py)
-color_dict = {
-    'Email \ndrafting': '#2ecc71',
-    'Document \nsummarisation': '#9b59b6',
-    'Long \nreport': '#e67e22',
-    'Meeting': '#3498db'
+def generate_scenario_tokens(
+    input_tokens,
+    output_median,
+    n_queries,
+    n_runs=n_runs
+):
+    """
+    Generate token lengths for a complete scenario.
+
+    Each Monte Carlo run represents one occurrence of the
+    complete scenario.
+
+    Example:
+        10 Word summaries means each Monte Carlo run contains
+        10 separate queries.
+    """
+
+    input_tokens = np.full(
+        (n_runs, n_queries),
+        int(input_tokens),
+        dtype=int
+    )
+
+    lambda_param = np.log(2) / output_median
+    output_tokens = np.random.exponential(
+        scale=1 / lambda_param,
+        size=(n_runs, n_queries)
+    )
+
+    output_tokens = np.maximum(
+        np.round(output_tokens).astype(int),
+        1
+    )
+    return input_tokens, output_tokens
+
+def run_scenario(
+    scenario,
+    model_name,
+    pue=DEFAULT_PUE,
+    pu=DEFAULT_PU,
+    n_runs=n_runs
+):
+    """
+    Run a Monte Carlo simulation for one scenario.
+
+    Each Monte Carlo sample represents the total energy required
+    for one occurrence of that scenario.
+
+    """
+
+    input_tokens, output_tokens = generate_scenario_tokens(
+        input_tokens=scenario["input_tokens"],
+        output_median=scenario["output_median"],
+        n_queries=scenario["n_queries"],
+        n_runs=n_runs
+    )
+
+    # Store energy for every individual query
+    energy_per_query = np.zeros(
+        (n_runs, scenario["n_queries"])
+    )
+
+    for q in range(scenario["n_queries"]):
+
+        energy_per_query[:, q] = calculate_energy(
+            input_tokens=input_tokens[:, q],
+            output_tokens=output_tokens[:, q],
+            model_name=model_name,
+            pue=pue,
+            pu=pu
+        )
+    total_energy = energy_per_query.sum(axis=1)
+
+    return total_energy
+
+scenario_colors = {
+    "Negligible input": "#95A5A6",
+    "1 meeting": "#3498DB",
+    "10 Word summaries": "#9B59B6",
+    "2 long PDF summaries": "#E67E22",
+    "10 emails": "#2ECC71",
+    "5 meetings": "#E74C3C",
+    "15 long PDF summaries": "#F1C40F",
 }
 
-ax = sns.violinplot(
-    data=plot_data,
-    x="Energy (Wh)",
-    y="Scenario",
-    orient="h",
-    inner=None,
-    cut=0,
-    density_norm="width", 
-    palette=color_dict
+scenarios = {
+    "Negligible input": {
+        "n_queries": 1,
+        "input_tokens": 1,
+        "output_median": 180,
+    },
+    "1 meeting": {
+        "n_queries": 1,
+        "input_tokens": 10000,
+        "output_median": 5000,
+    },
+    "10 Word summaries": {
+        "n_queries": 10,
+        "input_tokens": 3000,
+        "output_median": 350,
+    },
+    "2 long PDF summaries": {
+        "n_queries": 2,
+        "input_tokens": 15000,
+        "output_median": 900,
+    },
+    "10 emails": {
+        "n_queries": 10,
+        "input_tokens": 1000,
+        "output_median": 180,
+    },
+    "5 meetings": {
+        "n_queries": 5,
+        "input_tokens": 10000,
+        "output_median": 5000,
+    },
+    "15 long PDF summaries": {
+        "n_queries": 15,
+        "input_tokens": 15000,
+        "output_median": 900,
+    },
+}
+
+MODEL_NAME = "Llama 3.1 70B"
+
+scenario_energies = {}
+
+for scenario_name, scenario in scenarios.items():
+
+    scenario_energies[scenario_name] = run_scenario(
+        scenario=scenario,
+        model_name=MODEL_NAME,
+        pue=DEFAULT_PUE,
+        pu=DEFAULT_PU,
+        n_runs=n_runs
+    )
+
+statistics = []
+for scenario_name, energies in scenario_energies.items():
+
+    q25, median, q75 = np.percentile(
+        energies,
+        [25, 50, 75]
+    )
+
+    statistics.append({
+        "Scenario": scenario_name,
+        "Number of queries":
+            scenarios[scenario_name]["n_queries"],
+        "Input tokens per query":
+            scenarios[scenario_name]["input_tokens"],
+        "Median output tokens per query":
+            scenarios[scenario_name]["output_median"],
+        "Mean energy (Wh)":
+            np.mean(energies),
+        "Median energy (Wh)":
+            median,
+        "IQR lower (Q1) (Wh)":
+            q25,
+        "IQR upper (Q3) (Wh)":
+            q75,
+        "IQR (Wh)":
+            q75 - q25,
+        "Maximum simulated energy (Wh)":
+            np.max(energies),
+    })
+statistics_df = pd.DataFrame(statistics)
+
+statistics_df.to_csv(
+    "realistic_scenario_energy_statistics.csv",
+    index=False
 )
 
-energies_list = [email_energy, summary_energy, report_energy, meeting_energy]
+central_scenarios = [
+    "Negligible input",
+    "1 meeting",
+    "10 Word summaries",
+    "2 long PDF summaries",
+    "10 emails"
+]
 
-scenario_names = ["Email \ndrafting", "Document \nsummarisation", "Long \nreport", "Meeting"]
-#### VIOLIN PLOT #####
-for i, energies in enumerate(energies_list):
+additional_scenarios = [
+    "5 meetings",
+    "15 long PDF summaries"
+]
 
-    p25, p50, p75 = np.percentile(energies,[25,50,75])
+def plot_scenarios(
+    scenario_names,
+    filename,
+    title
+):
 
-    ax.hlines(i,p25,p75,color="black",lw=2)
-    ax.vlines(p50,i-0.1,i+0.1,color="white",lw=3)
-    ax.vlines(p50,i-0.1,i+0.1,color="black",lw=2)
+    plot_data = pd.concat([
+        pd.DataFrame({
+            "Energy (Wh)": scenario_energies[name],
+            "Scenario": name
+        })
 
-# Create custom legend entries with median values (same logic as fig1.py)
-legend_elements = []
-for category, energies in [
-    ('Email \ndrafting', email_energy),
-    ('Document \nsummarisation', summary_energy),
-    ('Long \nreport', report_energy),
-    ('Meeting', meeting_energy)
-]:
-    # Use the same energies that are actually plotted (no additional filtering)
-    p25, p50, p75 = np.percentile(energies, [25, 50, 75])
-    legend_elements.append(plt.Line2D([0], [0], 
-                         label=f'{category.replace(chr(10), " ")}: {p50:.2f} Wh (IQR:{p25:.2f}-{p75:.2f})', 
-                         color=color_dict[category], 
-                         linewidth=2))
+        for name in scenario_names
 
-# Add legend with same styling as Figure 1
-ax.legend(handles=legend_elements, frameon=True, facecolor='white', 
-         edgecolor='none', loc='lower right', bbox_to_anchor=(1, 0),
-         fontsize=12)
+    ], ignore_index=True)
+    with plt.rc_context({
+        "font.size":18,
+        "axes.titlesize":20,
+        "axes.labelsize":18,
+        "xtick.labelsize":10,
+        "ytick.labelsize":10
+    }):
+        plt.figure(figsize=(12, 8))
+    
+        ax = sns.violinplot(
+            data=plot_data,
+            x="Energy (Wh)",
+            y="Scenario",
+            orient="h",
+            inner=None,
+            cut=0,
+            density_norm="width",
+            palette={
+                name: scenario_colors[name]
+                for name in scenario_names
+            },
+            hue="Scenario",
+            legend=False
+        )
 
-plt.title('Per-Query Energy Consumption (P5-P95)\n Realistic Scenarios', fontsize=18, pad=20)
-plt.xlabel('Energy per Query (Wh)', fontsize=12)
-plt.grid(True, alpha=0.3)
+    
+        for i, name in enumerate(scenario_names):
+            energies = scenario_energies[name]
+            q25, median, q75 = np.percentile(
+                energies,
+                [25, 50, 75]
+            )
+    
+            # IQR
+            ax.hlines(
+                i,
+                q25,
+                q75,
+                color="black",
+                linewidth=3
+            )
+    
+            # Median
+            ax.vlines(
+                median,
+                i - 0.12,
+                i + 0.12,
+                color="black",
+                linewidth=3
+            )
+    
+    
+        plt.title(title)
+    
+        plt.xlabel(
+            "Energy per scenario (Wh)"
+        )
+    
+        plt.ylabel("Scenario")
+    
+        plt.grid(
+            True,
+            axis="x",
+            alpha=0.3
+        )
+    
+        plt.tight_layout()
+    
+        plt.savefig(
+            filename,
+            dpi=300,
+            bbox_inches="tight"
+        )
+    
+        plt.show()
+
+plot_scenarios(
+    central_scenarios,
+    "central_university_scenarios.png",
+    "Central Energy Estimates for University LLM Use"
+)
+
+plot_scenarios(
+    additional_scenarios,
+    "additional_university_scenarios.png",
+    "Additional High-Use University Scenarios"
+)
