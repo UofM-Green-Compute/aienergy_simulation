@@ -1,8 +1,11 @@
 # Energy Use of AI Inference, Efficiency Pathways, and Test-Time Scaling
 
-Analysis code accompanying the Joule manuscript:
 
-Felipe Oviedo et al., *Energy Use of AI Inference, Efficiency Pathways, and Test-Time Scaling*, Joule, 2026
+This is a fork of the original analysis code accompanying the Joule manuscript:
+
+Felipe Oviedo et al., *Energy Use of AI Inference, Efficiency Pathways, and Test-Time Scaling*, Joule, 2026.
+
+Code has been tweaked to determine how changing different parameters and assumptions affects the energy per query.
 
 ## Set-up environment
 
@@ -72,6 +75,25 @@ Script roles:
 - `sensitivity_linput_long_queries.py`
   Sensitivity analysis for prompt input length in the test-time-scaling regime.
 
+## Analyses developed as an extension to Joule paper
+
+- 'pdf_summaries.py'
+  Sensitivity analysis for page number and PDF number. This code does a 2D sweep in the traditional-query regime
+  and produces a heatmap to show the effect on energy per query in typical PDF summary scenarios.
+
+- 'PU_PUE sweep.py'
+  A 2D sweep of power usage effectiveness (PUE) and GPU utilisation (PU). The output shows the energy per query with respect to varying PUE and PU. Four heatmaps are also produced, showing the statistical effect on IQR, median, mean and interpercentile range.
+
+- 'output_input_sweep.py'
+  A 2D sweep of input and output, shows the energy dependence on input and output tokens. Heatmaps for IQR, median, mean and interpercentile range are also produced to see the fluctuations.
+- 'realistic_scenarios.py'
+  This code works in the traditional regime and produces violin plots for typical scenarios (email drafting, meeting transcripts, summaries, etc.). 
+- 'different_models.py'
+  The original Oviedo et al. code assumes a log-normal distribution. This code looks at what happens when different modelling assumptions are used. This is done to show that the median fluctuates marginally but in all stays fairly stagnant.
+- '1d_sweep_input.py'
+  Produces a 1D scatter plot to show energy dependence on input token lengths.
+- '1d_sweep_output.py'
+  Produces a 1D scatter plot to show energy dependence on output token lengths.
 ## License
 
 This project is distributed under the MIT License. See `LICENSE`.
