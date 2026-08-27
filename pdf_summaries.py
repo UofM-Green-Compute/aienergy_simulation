@@ -189,11 +189,10 @@ tps_regression_models, interpolation_models, max_tps_values = create_tps_regress
 
 # Simulation settings --- THESE ARE THE ONES TO CHANGE
 n_runs = 10000 # large number of repeats so allows for statistical calculations
-# change this to being the mean, not median
-mean_output_tokens = 300   # Median of the exponential distribution used to randomly sample input prompt lengths.
-fixed_input_length = 500  # Constant prompt length supplied to the TPS regression model when predicting throughput.
+median_output_tokens = 300   # Median of the exponential distribution used to randomly sample input prompt lengths.
+fixed_input_length = 300  # Constant prompt length supplied to the TPS regression model when predicting throughput.
 # Calculate lambda parameter for exponential distribution to achieve desired median
-lambda_param = 1 / mean_output_tokens  # For exponential, median = ln(2)/λ
+lambda_param = np.log(2) / median_output_tokens  # For exponential, median = ln(2)/λ
 
 # Define ranges and values
 def get_node_power(model_name):
@@ -314,199 +313,26 @@ plot_data_combined['Model'] = plot_data_combined['Model'].replace('Llama-3.1 Nem
 colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEEAD']
 color_dict = dict(zip(model_order, colors))
 
-# Set figure style
-# plt.style.use('default')
-plt.figure(figsize=(10, 8))
-
-# plt.rcParams.update({
-#     'font.size': 18,
-#     'axes.titlesize': 25,
-#     'axes.labelsize': 20,
-#     'xtick.labelsize': 18,
-#     'ytick.labelsize': 18,
-#     'legend.fontsize': 20,
-#     'figure.titlesize': 25
-# })
-
-# Create violin plot with custom parameters
-ax = sns.violinplot(data=plot_data_combined, 
-                    x='Energy (Wh)', 
-                    y='Model',
-                    hue='Model',  # Use hue instead of direct palette
-                    order=model_order,
-                    orient='h',
-                    inner=None,  # Don't show internal lines (we'll add them manually)
-                    cut=0,  # Don't extend the KDE below 0
-                    width=0.9,  # Make the violins wider
-                    density_norm='width',  # Scale all violins to the same width
-                    palette=color_dict,
-                    legend=False,  # Don't show the legend since it's redundant
-                    bw_adjust=1)  # Adjust bandwidth for smoother KDE
-
-# Add quartile lines manually for each violin
-for i, model_name in enumerate(model_order):
-    if model_name in all_model_energies:
-        energies = all_model_energies[model_name]
-        if not np.isnan(energies).all():
-            # Get quartiles
-            p25, p50, p75 = np.percentile(energies, [25, 50, 75])
-            # Add lines at each quartile
-            ax.hlines(y=i, xmin=p25, xmax=p75, color='black', linewidth=2, alpha=0.7)  # IQR line
-            ax.vlines(x=p50, ymin=i-0.1, ymax=i+0.1, color='white', linewidth=3)  # Median line
-            ax.vlines(x=p50, ymin=i-0.1, ymax=i+0.1, color='black', linewidth=2)  # Median line border
-
-# Remove any whisker lines that might remain
-for artist in ax.get_children():
-    if isinstance(artist, matplotlib.lines.Line2D):
-        if artist.get_linestyle() == '--':  # This catches the whisker lines
-            artist.set_visible(False)
-
-# Create custom legend entries with median and Q1/Q3 values
-legend_elements = []
-for model_name in model_order:
-    if model_name in all_model_energies:
-        energies = all_model_energies[model_name]
-        if not np.isnan(energies).all():
-            p25, p50, p75 = np.percentile(energies, [25, 50, 75])
-            legend_elements.append(plt.Line2D([0], [0], color=color_dict[model_name], 
-                                 label=f'{model_name.replace(chr(10), " ")}: {p50:.2f} Wh (IQR:{p25:.2f}-{p75:.2f})', 
-                                 linewidth=3))
-
-# Add legend
-ax.legend(handles=legend_elements, frameon=True, facecolor='white', 
-         edgecolor='none', loc='lower right', bbox_to_anchor=(1, 0),
-         fontsize=12)
-
-# Customize the plot
-plt.title('Per-Query Energy Consumption (P5-P95)\n Traditional Query (No Test-Time Scaling)', fontsize=14, pad=20)
-plt.xlabel('Energy per Query (Wh)', fontsize=12)
-plt.grid(True, alpha=0.3)
-
-# Remove y-axis label since it's redundant
-ax.set_ylabel('')
-from matplotlib.ticker import MaxNLocator
-# Increase font size of tick labels
-ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
-plt.xticks(fontsize=12)
-plt.yticks(fontsize=12)
-
-# Add a light grid for better readability
-ax.yaxis.grid(True, linestyle='--', alpha=0.3)
-
-# Adjust layout to prevent text cutoff
-plt.tight_layout()
-
-# Create manuscript_figures/updated_figures directory if it doesn't exist
-import os
-os.makedirs('manuscript_figures/updated_figures', exist_ok=True)
-
-# Save the first figure
-plt.savefig('manuscript_figures/updated_figures/figure1_per_query_energy_consumption.svg', format='svg', dpi=300, bbox_inches='tight')
-plt.savefig('manuscript_figures/updated_figures/figure1_per_query_energy_consumption.png', format='png', dpi=300, bbox_inches='tight')
-
-# Show the plot
-plt.show()
-
-
-# Print statistics for each model in the specified order
-print("\nModel-specific Statistics (based on 5-95 percentile filtered data):")
-for model_name in model_order:
-    if model_name in all_model_energies:
-        energies = all_model_energies[model_name]
-        if not np.isnan(energies).all():
-            p5, p25, p50, p75, p95 = np.percentile(energies, [5, 25, 50, 75, 95])
-            mean = np.mean(energies)
-            print(f"\n{model_name}:")
-            print(f"  5th percentile: {p5:.3f} Wh")
-            print(f"  Q1 (25th): {p25:.3f} Wh")
-            print(f"  Median: {p50:.3f} Wh")
-            print(f"  Q3 (75th): {p75:.3f} Wh")
-            print(f"  95th percentile: {p95:.3f} Wh")
-            print(f"  Mean: {mean:.3f} Wh")
-
-# Print TPS statistics for each model
-print("\nModel-specific TPS Statistics:")
-print("=" * 50)
-for model_name in model_order:
-    if model_name in all_model_tps:
-        tps_values = all_model_tps[model_name]
-        if not np.isnan(tps_values).all():
-            p5, p25, p50, p75, p95 = np.percentile(tps_values, [5, 25, 50, 75, 95])
-            mean = np.mean(tps_values)
-            std = np.std(tps_values)
-            print(f"\n{model_name}:")
-            print(f"  5th percentile: {p5:.1f} TPS")
-            print(f"  Q1 (25th): {p25:.1f} TPS")
-            print(f"  Median: {p50:.1f} TPS")
-            print(f"  Q3 (75th): {p75:.1f} TPS")
-            print(f"  95th percentile: {p95:.1f} TPS")
-            print(f"  Mean: {mean:.1f} TPS")
-            print(f"  Std Dev: {std:.1f} TPS")
-
-# Print regression model summary
-print("\n" + "="*60)
-print("TPS MODEL SUMMARY")
-print("="*60)
-print(f"Fixed Input Length Used: {fixed_input_length} tokens")
-print(f"Output Length Distribution: Exponential (mean = {mean_output_tokens} tokens)")
-print()
 
 # Print regression models first
 for model_name in sorted(tps_regression_models.keys()):
     model_info = tps_regression_models[model_name]
     n_points = model_info['n_points']
-    
-    print(f"{model_name} (Regression):")
-    print(f"  Training Points: {n_points}")
-    print(f"  Input Range: {model_info['input_range'][0]:.0f} - {model_info['input_range'][1]:.0f} tokens")
-    print(f"  Output Range: {model_info['output_range'][0]:.0f} - {model_info['output_range'][1]:.0f} tokens")
-    
+
     # Show regression coefficients (log-linear model interpretation)
     coef = model_info['model'].coef_
     intercept = model_info['model'].intercept_
-    print(f"  Model: log(TPS) = {intercept:.3f} + {coef[0]:.3f}*log(input) + {coef[1]:.3f}*log(output)")
-    print()
-
+    
 # Print interpolation models
 max_tps_models_found = False
 for model_name in sorted(interpolation_models.keys()):
     max_tps_models_found = True
     model_info = interpolation_models[model_name]
     n_points = model_info['n_points']
-    
-    print(f"{model_name} (Max TPS):")
-    print(f"  Method: Using highest observed TPS (optimistic)")
-    print(f"  Training Points: {n_points}")
-    print(f"  TPS Range: {model_info['tps_range'][0]:.0f} - {model_info['tps_range'][1]:.0f}")
-    print(f"  Using TPS: {model_info['max_tps']:.0f} (max value)")
-    print()
-
-if max_tps_models_found:
-    print(f"Max TPS models: {len(interpolation_models)}")
-
-print(f"Total models processed: {len(all_tps_models)}")
-# Print mean of the token output length
-print(f"Mean of the token output length: {np.mean(model_token_lengths)}")
-print(f"Std of the token output length: {np.std(model_token_lengths)}")
-# Print Q1 and Q3 of the token output length
-print(f"Q1 of the token output length: {np.percentile(model_token_lengths, 25)}")
-print(f"Q3 of the token output length: {np.percentile(model_token_lengths, 75)}")
-# Print P5 and P95 of the token output length
-print(f"P5 of the token output length: {np.percentile(model_token_lengths, 5)}")
-print(f"P95 of the token output length: {np.percentile(model_token_lengths, 95)}")
-# Print mean of the token output length
-print(f"Mean of the token output length: {np.mean(model_token_lengths)}")
-# Print std of the token output length
-print(f"Std of the token output length: {np.std(model_token_lengths)}")
-print(f"Max of the token output length: {np.max(model_token_lengths)}")
-print(f"Min of the token output length: {np.min(model_token_lengths)}")
 # %%
 
 #%%
 # Figure 2: Mixed distribution of top 3 models (by highest median energy consumption)
-print("\n" + "="*60)
-print("FIGURE 2: TOP 3 MOST ENERGY INTENSIVE MODELS MIXED DISTRIBUTION")
-print("="*60)
 
 # Calculate median energy for each model to determine top 3
 model_medians = {}
@@ -531,9 +357,6 @@ for i, model_name in enumerate(top_3_models, 1):
 additional_filtering = True  # Set to False to use only standard 5-95 filtering
 
 mixed_energies = []
-print(f"\nUsing two-stage filtering approach:")
-print(f"  Stage 1: Standard 5-95 percentile filtering (consistent with Figure 1)")
-print(f"  Stage 2: Additional filtering {'ENABLED' if additional_filtering else 'DISABLED'}")
 
 for model_name in top_3_models:
     if model_name in all_model_energies:
@@ -560,20 +383,109 @@ for model_name in top_3_models:
             stage1_reduction = (1 - stage1_std/original_std) * 100
             total_reduction = (1 - final_std/original_std) * 100
             
-            print(f"  {model_name}:")
-            print(f"    Original: {len(energies):,} samples, std: {original_std:.3f} Wh")
-            print(f"    Stage 1:  {len(stage1_filtered):,} samples, std: {stage1_std:.3f} Wh (reduction: {stage1_reduction:.1f}%)")
-            print(f"    Final:    {len(final_filtered):,} samples, std: {final_std:.3f} Wh (total reduction: {total_reduction:.1f}%)")
             
             mixed_energies.extend(final_filtered)
 
 mixed_energies = np.array(mixed_energies)
 
-# Add improvement pathways using the same logic as fig1.py
-print("\n" + "="*40)
-print("APPLYING IMPROVEMENT PATHWAYS")
-print("="*40)
+# =============================================================================
+# DOCUMENT SIZE SENSITIVITY (Baseline only)
+# =============================================================================
 
+baseline_model = "DeepSeek-R1"
+
+node_power = get_node_power(baseline_model)
+
+# Reuse uncertainty distributions
+pu = np.random.lognormal(mu_pu, sigma_pu, n_runs)
+pue = np.random.lognormal(mu_pue, sigma_pue, n_runs)
+
+# =============================================================================
+# DOCUMENT SIZE SENSITIVITY (Baseline only)
+# =============================================================================
+
+baseline_model = "DeepSeek-R1"
+
+node_power = get_node_power(baseline_model)
+
+# Reuse uncertainty distributions
+pu = np.random.lognormal(mu_pu, sigma_pu, n_runs)
+pue = np.random.lognormal(mu_pue, sigma_pue, n_runs)
+
+# -------------------------------------------------------------------------
+# Assumptions
+# -------------------------------------------------------------------------
+
+WORDS_PER_PAGE = 500
+TOKENS_PER_WORD = 1.17
+SUMMARY_WORDS_PER_PAGE = 100   # 20% compression
+
+num_of_pdf = np.arange(1, 11)
+pages = np.arange(1, 31)
+median_energy = np.zeros((len(num_of_pdf), len(pages)))
+
+for j, n_pdf in enumerate(num_of_pdf):
+    
+    for i, n_pages in enumerate(pages):
+    
+        input_tokens = n_pdf * n_pages * WORDS_PER_PAGE * TOKENS_PER_WORD
+        output_tokens = input_tokens * 0.2
+    
+        tps = predict_tps_for_lengths(
+            baseline_model,
+            input_tokens,
+            output_tokens,
+            tps_regression_models,
+            interpolation_models,
+            max_tps_values
+        )
+    
+        energies = (
+            pue
+            * node_power
+            * pu
+            * output_tokens
+            / tps
+        ) * 1000 / 3600
+    
+        median_energy[j, i] = np.median(energies)
+    
+with plt.rc_context({
+    "font.size":18,
+    "axes.titlesize":20,
+    "axes.labelsize":18,
+    "xtick.labelsize":10,
+    "ytick.labelsize":10
+}):
+
+    # Create heatmap
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        median_energy,
+        xticklabels=pages.astype(int),
+        yticklabels=num_of_pdf.astype(int),
+        cmap="viridis",
+        cbar_kws={"label":"Median energy (Wh)"}
+    )
+    
+    # Label axes
+# %%
+# %%
+    plt.xlabel("Number of pages")
+
+
+    plt.ylabel("Number of PDFs summarised")
+    plt.title("Parameter Sweep and energy density")
+    
+    # Improve tick label density
+# %%
+    plt.xticks(rotation=30)
+
+    plt.yticks(rotation=0)
+    
+    plt.tight_layout()
+    plt.show()
+    
 # Define improvement multipliers (same as fig1.py)
 mu_hardware, sigma_hardware = lognorm_params(1.5, 2.5)  # Hardware multiplier
 mu_algorithm, sigma_algorithm = lognorm_params(1.5, 10)  # Algorithm/Model multiplier
@@ -589,38 +501,3 @@ improved_multiplier = np.random.lognormal(mu_improved, sigma_improved, n_mixed_s
 hardware_energies = mixed_energies / hardware_multiplier
 algorithm_energies = mixed_energies / algorithm_multiplier
 improved_energies = mixed_energies / improved_multiplier
-
-print(f"Applied improvement multipliers to {n_mixed_samples:,} baseline samples (after all filtering)")
-print(f"Hardware multiplier range: {hardware_multiplier.min():.2f} - {hardware_multiplier.max():.2f}")
-print(f"Algorithm/Model multiplier range: {algorithm_multiplier.min():.2f} - {algorithm_multiplier.max():.2f}")
-print(f"Improved serving multiplier range: {improved_multiplier.min():.2f} - {improved_multiplier.max():.2f}")
-
-print(f"\nApplying 5-95 percentile filtering to improvement categories to remove outliers (consistent with Figure 1):")
-
-# Create DataFrame for violin plot with all distributions
-def prepare_improvement_data(energies, category):
-    # Apply 5-95 percentile filtering to improvement categories to remove outliers created by multipliers
-    # This is consistent with how Figure 1 handles each model's data
-    if category != 'Baseline':
-        # Apply same 5-95 percentile filtering as used in Figure 1
-        p5, p95 = np.percentile(energies, [5, 95])
-        filtered_energies = energies[(energies >= p5) & (energies <= p95)]
-        print(f"    {category}: Applied 5-95 percentile filtering {len(energies):,} → {len(filtered_energies):,} samples")
-        return pd.DataFrame({
-            'Energy (Wh)': filtered_energies,
-            'Distribution': category
-        })
-    else:
-        # Baseline already has all filtering applied
-        return pd.DataFrame({
-            'Energy (Wh)': energies,
-            'Distribution': category
-        })
-
-# Combine all distributions with new names and order
-plot_data_all = pd.concat([
-    prepare_improvement_data(mixed_energies, 'Baseline'),
-    prepare_improvement_data(algorithm_energies, 'Model'),
-    prepare_improvement_data(improved_energies, 'Serving \nPlatform'),
-    prepare_improvement_data(hardware_energies, 'Hardware \n& Datacenter')
-])
